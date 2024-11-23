@@ -1,0 +1,167 @@
+// -------------------------------------------------------------------------------------- //
+// Robert's Smorgasbord 2023                                                              //
+// https://robertssmorgasbord.net                                                         //
+// https://www.youtube.com/@robertssmorgasbord                                            //
+// Capacitive Liquid Level Sensing (8): Reference Sensor (2) https://youtu.be/pKZHFjDShpM //
+// -------------------------------------------------------------------------------------- //
+
+//#define DEBUG  // Kommentar für Debugging, um zusätzliche Ausgaben zu aktivieren
+
+// Definition der Pins und Parameter für die Messung
+const byte           sig_sense_pin          =   21;  // Pin für den kapazitiven Sensor (Signal)
+const byte           sig_drive_pin          =   20;  // Pin für die Steuerung des Signal-Stroms
+const unsigned long  sig_charge_us          =  100;  // Ladezeit in Mikrosekunden (us) für das Signal
+const float          sig_resistor_mohm      =    2.0; // Widerstandswert des RC-Elements in MOhm
+const unsigned long  sig_discharge_ms       =   10;   // Entladezeit in Millisekunden (ms) für das Signal
+const byte           ref_sense_pin          =   18;  // Pin für den kapazitiven Referenzsensor
+const byte           ref_drive_pin          =   17;  // Pin für die Steuerung des Referenzstroms
+const unsigned long  ref_charge_us          =  150;  // Ladezeit in Mikrosekunden (us) für das Referenzsignal
+const float          ref_resistor_mohm      =    2.0; // Widerstandswert des RC-Elements in MOhm für die Referenz
+const unsigned long  ref_discharge_ms       =   10;   // Entladezeit in Millisekunden (ms) für das Referenzsignal
+const unsigned int   average_n_measurements =   20;   // Anzahl der Messungen für den Durchschnitt
+const float          sig_dry_pf             =   30.5; // Trockenkapazität des Signals in pF
+const float          sig_min_pf             =   31.0; // Minimale Kapazität des Signals für die Messung in pF
+const float          ref_dry_pf             =   46.5; // Trockenkapazität der Referenz in pF
+const float          ref_min_pf             =   47.0; // Minimale Kapazität der Referenz für die Messung in pF
+const float          conversion_gain_ml     =   67.9; // Umrechnungsfaktor von Kapazität zu Volumen in ml
+const float          conversion_offset_ml   =   75.0; // Offset für die Umrechnung in ml  
+
+void setup()
+{
+   // Startet die serielle Kommunikation mit 1MBaud für eine schnelle Datenübertragung
+   Serial.begin(1000000L); // 1MBaud
+
+   // Wartet, bis die serielle Kommunikation verfügbar ist
+   while (!Serial);
+
+   // Setzt die Pins für das Signal und die Referenz als Ausgang
+   pinMode(sig_drive_pin, OUTPUT); 
+   digitalWrite(sig_drive_pin, LOW); // Setzt das Signal auf LOW (aus)
+   delay(sig_discharge_ms);  // Wartezeit für das Entladen des Signals
+   pinMode(ref_drive_pin, OUTPUT); 
+   digitalWrite(ref_drive_pin, LOW); // Setzt die Referenz auf LOW (aus)
+   delay(ref_discharge_ms);  // Wartezeit für das Entladen der Referenz
+}
+
+void loop()
+{
+   float         ref_capacitance_pf; // Variable für die Kapazität der Referenz in pF
+   float         sig_capacitance_pf; // Variable für die Kapazität des Signals in pF
+   unsigned int  measurement;        // Zähler für die Anzahl der Messungen
+
+   ref_capacitance_pf = 0;
+   sig_capacitance_pf = 0;
+
+   // Durchführung von N Messungen und Berechnung des Durchschnitts
+   for (measurement = 0; measurement < average_n_measurements; measurement++)
+   {
+      ref_capacitance_pf += measure_capacitance_pf(ref_sense_pin,
+                                                   ref_drive_pin,
+                                                   ref_charge_us,
+                                                   ref_resistor_mohm,
+                                                   ref_discharge_ms);
+      sig_capacitance_pf += measure_capacitance_pf(sig_sense_pin,
+                                                   sig_drive_pin,
+                                                   sig_charge_us,
+                                                   sig_resistor_mohm,
+                                                   sig_discharge_ms);
+   }
+
+   // Berechnet den Durchschnitt der Messungen
+   ref_capacitance_pf /= average_n_measurements;
+   sig_capacitance_pf /= average_n_measurements;
+   
+   // Gibt die Kapazitäten der Referenz und des Signals aus
+   Serial.print(ref_capacitance_pf, 1); 
+   Serial.print("pF REF | ");
+   Serial.print(sig_capacitance_pf, 1); 
+   Serial.print("pF SIG | ");
+
+   // Bestimmt den Zustand des Sensors basierend auf der Kapazität
+   if (ref_capacitance_pf <= ref_min_pf)  // Wenn die Referenzkapazität zu niedrig ist
+   {
+      Serial.print("dry");  // Trockener Zustand
+   }
+   else if (sig_capacitance_pf <= sig_min_pf)  // Wenn die Signal-Kapazität zu niedrig ist
+   {
+      Serial.print("low");  // Niedriger Füllstand
+   }
+   else
+   {
+      // Berechnet das Volumen basierend auf der Differenz der Kapazitäten
+      Serial.print(  (  (sig_capacitance_pf - sig_dry_pf) 
+                      / (ref_capacitance_pf - ref_dry_pf)) 
+                   * conversion_gain_ml
+                   + conversion_offset_ml, 0);  // Umrechnung auf Milliliter (ml)
+      Serial.print("ml");  // Volumen in Millilitern ausgeben
+   }
+   
+   Serial.println("");  // Neue Zeile für die nächste Messung
+   delay(1);  // Kurze Verzögerung, um den nächsten Messvorgang zu starten
+}
+
+float measure_capacitance_pf(byte          sense_pin,
+                             byte          drive_pin,
+                             unsigned long charge_time_us,
+                             float         resistor_value_mohm,
+                             unsigned long discharge_time_ms)
+{
+   unsigned int adc_value_discharged;  // ADC-Wert vor dem Laden
+   unsigned int adc_value_charged;     // ADC-Wert nach dem Laden
+   
+   digitalWrite(drive_pin, LOW);  // Setzt den Steuerpin auf LOW (Signal aus)
+
+   // Liest den ADC-Wert vor dem Laden (Kapazität entladen)
+   adc_value_discharged = analogRead(sense_pin);  
+   
+   // Prüft, ob die Spannung des entladenen Signals zu hoch ist
+   if (adc_value_discharged > 1023 * 0.01) 
+      Serial.println("ERROR: Discharged voltage too high!");
+
+   digitalWrite(drive_pin, HIGH);  // Setzt den Steuerpin auf HIGH (Signal laden)
+   delayMicroseconds(charge_time_us);  // Wartezeit für das Laden
+
+   // Liest den ADC-Wert nach dem Laden (Kapazität geladen)
+   adc_value_charged = analogRead(sense_pin); 
+
+   digitalWrite(drive_pin, LOW);  // Setzt den Steuerpin wieder auf LOW
+   delay(discharge_time_ms);  // Wartezeit für das Entladen
+   
+   // Prüft, ob die Spannung des geladenen Signals zu hoch oder zu niedrig ist
+   if (adc_value_charged > 1023 * 0.9) 
+      Serial.println("ERROR: Charged voltage too high!");
+   if (adc_value_charged < 1023 * 0.2) 
+      Serial.println("ERROR: Charged voltage too low!");
+
+   // Berechnet die Kapazität in pF basierend auf den ADC-Werten
+   return capacitance_pf(resistor_value_mohm,
+                         5.0,  // Betriebsspannung in V
+                         charge_time_us,
+                         5.0 * adc_value_charged / 1024.0);  // Berechnet die Spannung des geladenen Signals
+}
+
+float capacitance_pf(float r_mohm,  // Widerstand in MOhm
+                     float vb_v,    // Betriebsspannung in V
+                     float t_us,    // Ladezeit in Mikrosekunden (us)
+                     float vc_t_v ) // Spannung der Kapazität nach der Ladezeit in V                 
+{
+   // Berechnung der Kapazität (C) basierend auf dem RC-Glied:
+   // C = -(t / (R * ln(1 - Vc/Vb)))
+   return -1.0 * ((t_us / r_mohm) / log(1 - (vc_t_v / vb_v)));
+}
+
+/* Erklärungen
+
+Kapazitätsmessung:
+
+Der Code misst die Kapazität des Signals und der Referenz mithilfe eines RC-Gliedes (Widerstand und Kondensator).
+Die Kapazität wird durch das Laden eines Kondensators über einen Widerstand gemessen, wobei die Spannung über dem Kondensator mit einem ADC (Analog-Digital-Wandler) erfasst wird.
+Berechnung des Volumens:
+
+Der Code berechnet das Volumen basierend auf der gemessenen Kapazität des Signals und der Referenz. Es wird eine Umrechnung von Kapazität in Milliliter vorgenommen.
+Fehlerüberprüfung:
+
+Fehlerüberprüfungen stellen sicher, dass die Spannungen innerhalb der erwarteten Bereiche liegen, und geben entsprechende Fehler aus, wenn sie außerhalb des zulässigen Bereichs liegen.
+Durchschnittliche Messung:
+
+Der Code führt mehrere Messungen durch, um den Wert zu glätten und eine genauere Ausgabe zu erhalten. */
